@@ -1,9 +1,11 @@
 ﻿using Microsoft.CodeAnalysis.CSharp.Scripting;
 using Microsoft.CodeAnalysis.Scripting;
+using Microsoft.CodeAnalysis;
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using UndertaleModLib;
 using UndertaleModLib.Scripting;
 using UndertaleModLib.Util;
@@ -134,7 +136,9 @@ public partial class Program : IScriptInterface
             new Option<string[]>(new[] { "-c", "--code" },
                 $"The code files to dump. Ex. gml_Script_init_map gml_Script_reset_map. Specify '{UMT_DUMP_ALL}' to dump all code entries"),
             new Option<bool>(new[] { "-s", "--strings" }, "Whether to dump all strings"),
-            new Option<bool>(new[] { "-t", "--textures" }, "Whether to dump all embedded textures")
+            new Option<bool>(new[] { "-t", "--textures" }, "Whether to dump all embedded textures"),
+            new Option<string[]>(new[] { "-e", "--externalizetextures"},
+                "Whether to externalize textures. Ex. ../gamedata/textures patched.win")
         };
         dumpCommand.Handler = CommandHandler.Create<DumpOptions>(Program.Dump);
 
@@ -370,6 +374,10 @@ public partial class Program : IScriptInterface
         // If user wanted to dump embedded textures, dump all of them
         if (options.Textures)
             program.DumpAllTextures();
+
+        Console.WriteLine(options.ExternalizeTextures?.Length);
+        if (options.ExternalizeTextures?.Length >= 2)
+            program.ExternalizeTextures(options.ExternalizeTextures[0], options.ExternalizeTextures[1]);
 
         return EXIT_SUCCESS;
     }
@@ -661,6 +669,164 @@ public partial class Program : IScriptInterface
             using FileStream fs = new($"{directory}/{texture.Name.Content}.png", FileMode.Create);
             texture.TextureData.Image.SavePng(fs);
         }
+    }
+
+    int RGBAle_to_ARGBbe(UInt32 col) => (int)
+        ((((col >> 24) & 0xFF) << 24) | // A___ -> A___
+         (((col >> 16) & 0xFF)      ) | // _B__ -> ___B
+         (((col >>  8) & 0xFF) <<  8) | // __G_ -> __G_
+         (((col      ) & 0xFF) << 16)); // ___R -> _R__
+
+
+    // Create placeholder ID texture, little endian
+    GMImage GetPlaceholderTexture(int _id)   
+    {
+        uint id = (uint)_id;
+        byte[] data = new byte[8];
+        Buffer.BlockCopy(BitConverter.GetBytes(RGBAle_to_ARGBbe(0xFFBEADDE     )), 0, data, 0, 4);
+        Buffer.BlockCopy(BitConverter.GetBytes(RGBAle_to_ARGBbe(0xFF000000 + id)), 0, data, 4, 4);
+
+        GMImage img = new GMImage(GMImage.ImageFormat.RawBgra, 2, 1, data);
+        return img.ConvertToPng();
+    }
+
+    [DllImport("astcUtil.so", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int convert_texture_swizzle(int w, int h, int len, uint blk_w, uint blk_h, astcenc_swz r, astcenc_swz g, astcenc_swz b, astcenc_swz a, IntPtr in_tex, IntPtr out_tex);
+
+    public static long GetASTCPayloadSize(int w, int h, uint blk_w, uint blk_h)
+    {
+        // 16 bytes per <x,y> block
+        return 16 *
+            ((w + blk_w - 1) / blk_w) * 
+            ((h + blk_h - 1) / blk_h);
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 1)]
+    struct PVRTC_Header
+    {
+        public enum FormatEnum
+        {
+            ASTC4X4 = 0x1B,
+            ASTC5x5 = 0x1D,
+            ASTC6x5 = 0x1F
+        }
+
+        UInt32 Version = 0x03525650;
+        UInt32 Flags = 0;
+        UInt64 Format = 0;
+        UInt32 ColourSpace = 0;
+        UInt32 ChannelType = 0;
+        UInt32 Height = 0;
+        UInt32 Width = 0;
+        UInt32 Depth = 1;
+        UInt32 NumSurfaces = 1;
+        UInt32 NumFaces = 1;
+        UInt32 MipCount = 1;
+        UInt32 MetadataSize = 0;
+
+        public PVRTC_Header(int Width, int Height, FormatEnum Format)
+        {
+            this.Width = (UInt32)Width;
+            this.Height = (UInt32)Height;
+            this.Format = (UInt64)Format;
+        }
+
+        public static implicit operator ReadOnlySpan<byte>(PVRTC_Header h) => MemoryMarshal.AsBytes(MemoryMarshal.CreateSpan(ref h, 1));
+    }
+
+    public enum astcenc_swz : Int32
+    {
+        ASTCENC_SWZ_R = 0,
+        ASTCENC_SWZ_G = 1,
+        ASTCENC_SWZ_B = 2,
+        ASTCENC_SWZ_A = 3
+    };
+
+    unsafe void outputCompressedTexture(GMImage img, string out_path)
+    {
+        // Get a buffer with the image
+        GMImage newImg = img.ConvertToFormat(GMImage.ImageFormat.RawBgra);
+        var buffer = newImg.ToSpan();
+
+        // Allocate space for the ASTC Payload from convert_texture_swizzle
+        byte[] out_buffer = new byte[GetASTCPayloadSize(img.Width, img.Height, 4, 4)];
+
+        fixed (byte* bufferHandle = buffer)
+        fixed (byte* outBufferHandle = out_buffer)
+        {
+            PVRTC_Header pw = new PVRTC_Header(img.Width, img.Height, PVRTC_Header.FormatEnum.ASTC4X4);
+            int res = convert_texture_swizzle(
+                img.Width, img.Height, buffer.Length, 4, 4,
+                astcenc_swz.ASTCENC_SWZ_B, astcenc_swz.ASTCENC_SWZ_G,
+                astcenc_swz.ASTCENC_SWZ_R, astcenc_swz.ASTCENC_SWZ_A,
+                (IntPtr)bufferHandle, (IntPtr)outBufferHandle);
+
+            if (res == 0)
+                throw new Exception($"Failed to encode {out_path}...\n");
+
+            using FileStream fs = new FileStream(out_path, FileMode.OpenOrCreate);
+            fs.Write(pw);
+            fs.Write(out_buffer);
+        }
+    }
+
+    private void ExternalizeTextures(string directory, string new_file)
+    {
+        int currentId = 0;
+
+        Task[] tasks = new Task[4];
+        if (!Directory.Exists(directory))
+            Directory.CreateDirectory(directory);
+
+
+        int total = 0;
+        foreach (var sprite in Data.Sprites)
+            if (sprite.SpineTextures != null)
+                total += sprite.SpineTextures.Count;
+        total += Data.EmbeddedTextures.Count;
+
+        foreach (var sprite in Data.Sprites)
+        {
+            if (sprite.SpineTextures == null)
+                continue;
+
+            int spineCount = 0;
+            foreach (var texture in sprite.SpineTextures)
+            {
+                // First reencode the spine texture
+                var path = Path.Combine(directory, $"{currentId}.pvr");
+                Console.WriteLine($"[{currentId / (float)total * 100f,5:F1}%] Spine Texture {spineCount++} (sprite: {sprite.Name}) -> {path}");
+
+                GMImage img;
+                if (texture.IsQOI)
+                    img = GMImage.FromQoi(texture.TexBlob);
+                else
+                    img = GMImage.FromPng(texture.TexBlob);
+
+                outputCompressedTexture(img, path);
+
+                // Now fill it with a placeholder
+                var placeholder = GetPlaceholderTexture(currentId);
+                texture.TexBlob = placeholder.ToSpan().ToArray();
+
+                currentId++;
+            }
+        }
+
+        foreach (var texture in Data.EmbeddedTextures)
+        {
+            // Now reencode the other textures
+            var path = Path.Combine(directory, $"{currentId}.pvr");
+            Console.WriteLine($"[{currentId / (float)total * 100f,5:F1}%] {texture.Name} -> {path}");
+            outputCompressedTexture(texture.TextureData.Image, path);
+
+            // Now fill it with a placeholder
+            texture.TextureData.Image = GetPlaceholderTexture(currentId);
+            currentId++;
+        }
+
+        // Save our new file!
+        SaveDataFile(new_file);
     }
 
     /// <summary>

@@ -36,4 +36,9 @@ public class DumpOptions
 	/// Determines if embedded textures should get dumped
 	/// </summary>
 	public bool Textures { get; set; }
+
+	/// <summary>
+	/// Names of the code entries that should get dumped
+	/// </summary>
+	public string[] ExternalizeTextures { get; set; }
 }

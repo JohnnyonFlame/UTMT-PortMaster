@@ -114,7 +114,7 @@ public class GMImage
     /// <summary>
     /// Basic private constructor for use by other creation methods; just initializes the given fields.
     /// </summary>
-    private GMImage(ImageFormat format, int width, int height, byte[] data)
+    public GMImage(ImageFormat format, int width, int height, byte[] data)
     {
         Format = format;
         Width = width;
