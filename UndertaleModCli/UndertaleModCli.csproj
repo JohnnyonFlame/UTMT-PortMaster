@@ -1,18 +1,21 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
-    <Platforms>AnyCPU;x64</Platforms>
+    <Platforms>arm64</Platforms>
+    <SelfContained>False</SelfContained>
     <Nullable>disable</Nullable>
     <RollForward>LatestMajor</RollForward>
-    <GenerateDocumentationFile>True</GenerateDocumentationFile>
+    <GenerateDocumentationFile>False</GenerateDocumentationFile>
     <NeutralLanguage>en</NeutralLanguage>
     <ResourceLanguages>en</ResourceLanguages>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <!-- Suppress all missing XML comment warnings -->
     <NoWarn>1591</NoWarn>
+    <PublishTrimmed>False</PublishTrimmed>
+    <PublishSingleFile>False</PublishSingleFile>
   </PropertyGroup>
 
   <ItemGroup>
