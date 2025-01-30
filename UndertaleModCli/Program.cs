@@ -747,16 +747,17 @@ public partial class Program : IScriptInterface
         // Get a buffer with the image
         GMImage newImg = img.ConvertToFormat(GMImage.ImageFormat.RawBgra);
         var buffer = newImg.ToSpan();
+        img = null;
 
         // Allocate space for the ASTC Payload from convert_texture_swizzle
-        byte[] out_buffer = new byte[GetASTCPayloadSize(img.Width, img.Height, 4, 4)];
+        byte[] out_buffer = new byte[GetASTCPayloadSize(newImg.Width, newImg.Height, 4, 4)];
 
         fixed (byte* bufferHandle = buffer)
         fixed (byte* outBufferHandle = out_buffer)
         {
-            PVRTC_Header pw = new PVRTC_Header(img.Width, img.Height, PVRTC_Header.FormatEnum.ASTC4X4);
+            PVRTC_Header pw = new PVRTC_Header(newImg.Width, newImg.Height, PVRTC_Header.FormatEnum.ASTC4X4);
             int res = convert_texture_swizzle(
-                img.Width, img.Height, buffer.Length, 4, 4,
+                newImg.Width, newImg.Height, buffer.Length, 4, 4,
                 astcenc_swz.ASTCENC_SWZ_B, astcenc_swz.ASTCENC_SWZ_G,
                 astcenc_swz.ASTCENC_SWZ_R, astcenc_swz.ASTCENC_SWZ_A,
                 (IntPtr)bufferHandle, (IntPtr)outBufferHandle);
@@ -807,7 +808,11 @@ public partial class Program : IScriptInterface
 
                 // Now fill it with a placeholder
                 var placeholder = GetPlaceholderTexture(currentId);
+                texture.TexBlob = null;
                 texture.TexBlob = placeholder.ToSpan().ToArray();
+
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
 
                 currentId++;
             }
@@ -821,7 +826,12 @@ public partial class Program : IScriptInterface
             outputCompressedTexture(texture.TextureData.Image, path);
 
             // Now fill it with a placeholder
+            texture.TextureData.Image = null;
             texture.TextureData.Image = GetPlaceholderTexture(currentId);
+
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+
             currentId++;
         }
 
