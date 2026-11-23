@@ -139,7 +139,9 @@ public partial class Program : IScriptInterface
             new Option<bool>(new[] { "-s", "--strings" }, "Whether to dump all strings"),
             new Option<bool>(new[] { "-t", "--textures" }, "Whether to dump all embedded textures"),
             new Option<string[]>(new[] { "-e", "--externalizetextures"},
-                "Whether to externalize textures. Ex. ../gamedata/textures patched.win")
+                "Whether to externalize textures. Ex. ../gamedata/textures patched.win"),
+            new Option<FileInfo>(new[] { "-k", "--keeptextures" },
+                "Text file of embedded texture page indices (one per line, '#' comments) that -e leaves embedded as PNG")
         };
         dumpCommand.Handler = CommandHandler.Create<DumpOptions>(Program.Dump);
 
@@ -291,7 +293,13 @@ public partial class Program : IScriptInterface
         if (options.Scripts != null)
         {
             foreach (FileInfo script in options.Scripts)
+            {
                 program.RunCSharpFile(script.FullName);
+
+                // Don't save a half-modified data file when a script fails
+                if (!program.ScriptExecutionSuccess)
+                    return EXIT_FAILURE;
+            }
         }
 
         // if line to execute was given, execute it
@@ -379,7 +387,19 @@ public partial class Program : IScriptInterface
 
         Console.WriteLine(options.ExternalizeTextures?.Length);
         if (options.ExternalizeTextures?.Length >= 2)
-            program.ExternalizeTextures(options.ExternalizeTextures[0], options.ExternalizeTextures[1]);
+        {
+            HashSet<int> keep;
+            try
+            {
+                keep = program.ReadKeepTextures(options.KeepTextures);
+            }
+            catch (Exception e)
+            {
+                Console.Error.WriteLine(e.Message);
+                return EXIT_FAILURE;
+            }
+            program.ExternalizeTextures(options.ExternalizeTextures[0], options.ExternalizeTextures[1], keep);
+        }
 
         return EXIT_SUCCESS;
     }
@@ -779,7 +799,30 @@ public partial class Program : IScriptInterface
         }
     }
 
-    private void ExternalizeTextures(string directory, string new_file)
+    // Parse the --keeptextures file: one embedded texture page index per line, '#' starts a comment.
+    private HashSet<int> ReadKeepTextures(FileInfo file)
+    {
+        var keep = new HashSet<int>();
+        if (file == null)
+            return keep;
+        if (!file.Exists)
+            throw new FileNotFoundException($"Keep-textures file '{file.FullName}' does not exist.");
+
+        int lineNum = 0;
+        foreach (string raw in File.ReadAllLines(file.FullName))
+        {
+            lineNum++;
+            string line = raw.Split('#')[0].Trim();
+            if (line.Length == 0)
+                continue;
+            if (!int.TryParse(line, out int idx) || idx < 0 || idx >= Data.EmbeddedTextures.Count)
+                throw new InvalidDataException($"{file.Name}:{lineNum}: '{line}' is not a texture page index (0-{Data.EmbeddedTextures.Count - 1}).");
+            keep.Add(idx);
+        }
+        return keep;
+    }
+
+    private void ExternalizeTextures(string directory, string new_file, HashSet<int> keep)
     {
         int currentId = 0;
 
@@ -826,8 +869,20 @@ public partial class Program : IScriptInterface
             }
         }
 
-        foreach (var texture in Data.EmbeddedTextures)
+        for (int pageIdx = 0; pageIdx < Data.EmbeddedTextures.Count; pageIdx++)
         {
+            var texture = Data.EmbeddedTextures[pageIdx];
+
+            // Kept pages stay embedded as a normal PNG (gmloader uploads non-2x1 PNGs as plain RGBA).
+            // They get no .pvr and no ID, so the placeholder IDs stay consecutive for gmloader's preload.
+            if (keep.Contains(pageIdx))
+            {
+                if (texture.TextureData.Image.Format != GMImage.ImageFormat.Png)
+                    texture.TextureData.Image = texture.TextureData.Image.ConvertToPng();
+                Console.WriteLine($"[ kept ] {texture.Name} ({texture.TextureData.Image.Width}x{texture.TextureData.Image.Height}) left embedded");
+                continue;
+            }
+
             // Now reencode the other textures
             var path = Path.Combine(directory, $"{currentId}.pvr");
             Console.WriteLine($"[{currentId / (float)total * 100f,5:F1}%] {texture.Name} -> {path}");
