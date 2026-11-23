@@ -41,4 +41,9 @@ public class DumpOptions
 	/// Names of the code entries that should get dumped
 	/// </summary>
 	public string[] ExternalizeTextures { get; set; }
+
+	/// <summary>
+	/// Text file listing embedded texture page indices that externalization must leave embedded (uncompressed)
+	/// </summary>
+	public FileInfo KeepTextures { get; set; }
 }
